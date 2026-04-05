@@ -29,13 +29,11 @@ Built for solo developers, indie hackers, startups, and internal tools that need
 
 ## Why KiwiAuth?
 
-Auth is one of those things you can't afford to get wrong, but you also don't want to spend a week on.
+Auth is one of those things you can't afford to get wrong — but you also can't afford to overpay for it or spend weeks building it from scratch.
 
-- **IdentityServer / Duende**: powerful, but overkill for most apps
-- **Auth0 / Clerk**: great DX, but adds cost and vendor lock-in
-- **Rolling your own**: risky, tedious, easy to miss something
+Managed auth services add recurring costs that grow with your user base. Rolling your own is risky and easy to get wrong. Enterprise frameworks are powerful but bring far more complexity than most apps need.
 
-KiwiAuth is the pragmatic middle ground. A pre-built, production-minded auth layer built on boring, well-understood .NET primitives.
+KiwiAuth is the pragmatic middle ground — a pre-built, production-minded auth layer built on boring, well-understood .NET primitives. No subscriptions, no lock-in, no guesswork.
 
 ---
 
