@@ -15,18 +15,21 @@ public class AuthService
     private readonly TokenService _tokenService;
     private readonly KiwiAuthOptions _options;
     private readonly IEmailSender? _emailSender;
+    private readonly IKiwiAuthEventSink _eventSink;
 
     public AuthService(
         UserManager<ApplicationUser> userManager,
         KiwiDbContext db,
         TokenService tokenService,
         IOptions<KiwiAuthOptions> options,
+        IKiwiAuthEventSink eventSink,
         IServiceProvider services)
     {
         _userManager = userManager;
         _db = db;
         _tokenService = tokenService;
         _options = options.Value;
+        _eventSink = eventSink;
         _emailSender = services.GetService<IEmailSender>();
     }
 
@@ -133,20 +136,53 @@ public class AuthService
         if (stored is null)
             return (false, "invalid_token", "Refresh token is invalid.", null);
 
+        // ─── Reuse detection (OAuth 2.0 Security BCP §4.14) ─────────────────
+        // A token that was rotated (replaced by another) but is being presented
+        // again means either the legitimate client cached a stale copy OR the
+        // token was stolen and the thief is racing the owner. We cannot tell
+        // those apart, so we assume compromise and revoke the entire token
+        // family. A short grace window absorbs the benign race case (multi-tab
+        // SPA, retried mobile request) without false-flagging.
+        if (stored.ReplacedByTokenHash is not null && stored.RevokedAtUtc.HasValue)
+        {
+            var graceWindow = TimeSpan.FromSeconds(_options.RefreshToken.GraceWindowSeconds);
+            var withinGrace = stored.RevokedAtUtc.Value.Add(graceWindow) > DateTime.UtcNow;
+
+            if (withinGrace)
+                return (false, "token_recently_rotated",
+                    "Refresh token was recently rotated; please use the latest one.", null);
+
+            var revokedCount = await RevokeFamilyAsync(stored.FamilyId, ip,
+                RefreshTokenRevocationReasons.ReuseDetected);
+            await _db.SaveChangesAsync();
+
+            var now = DateTime.UtcNow;
+            await _eventSink.OnRefreshTokenReuseDetectedAsync(
+                new RefreshTokenReuseEvent(stored.UserId, stored.FamilyId, ip, now));
+            await _eventSink.OnFamilyRevokedAsync(
+                new TokenFamilyRevokedEvent(stored.UserId, stored.FamilyId,
+                    RefreshTokenRevocationReasons.ReuseDetected, revokedCount, now));
+
+            return (false, "token_reuse_detected",
+                "Session invalidated because a rotated refresh token was replayed.", null);
+        }
+
         if (!stored.IsActive)
             return (false, "token_expired_or_revoked", "Refresh token has expired or been revoked.", null);
 
-        // Rotation: revoke the old token, issue a fresh one.
+        // Rotation: revoke the old token, issue a fresh one on the same family.
         var (newRaw, newHash) = _tokenService.GenerateRefreshToken();
 
         stored.RevokedAtUtc = DateTime.UtcNow;
         stored.RevokedByIp = ip;
         stored.ReplacedByTokenHash = newHash;
+        stored.ReasonRevoked = RefreshTokenRevocationReasons.Rotated;
 
         _db.RefreshTokens.Add(new RefreshToken
         {
             UserId = stored.UserId,
             TokenHash = newHash,
+            FamilyId = stored.FamilyId,
             ExpiresAtUtc = DateTime.UtcNow.AddDays(_options.RefreshToken.DaysToLive),
             CreatedAtUtc = DateTime.UtcNow,
             CreatedByIp = ip,
@@ -165,6 +201,28 @@ public class AuthService
         });
     }
 
+    /// <summary>
+    /// Revokes every still-active token in a family. Called on reuse detection
+    /// and available for future "sign out everywhere" admin actions.
+    /// Caller is responsible for SaveChangesAsync.
+    /// </summary>
+    private async Task<int> RevokeFamilyAsync(Guid familyId, string ip, string reason)
+    {
+        var familyMembers = await _db.RefreshTokens
+            .Where(t => t.FamilyId == familyId && t.RevokedAtUtc == null)
+            .ToListAsync();
+
+        var now = DateTime.UtcNow;
+        foreach (var member in familyMembers)
+        {
+            member.RevokedAtUtc = now;
+            member.RevokedByIp = ip;
+            member.ReasonRevoked = reason;
+        }
+
+        return familyMembers.Count;
+    }
+
     public async Task<bool> LogoutAsync(string rawRefreshToken, string ip)
     {
         var tokenHash = _tokenService.HashToken(rawRefreshToken);
@@ -175,6 +233,7 @@ public class AuthService
 
         stored.RevokedAtUtc = DateTime.UtcNow;
         stored.RevokedByIp = ip;
+        stored.ReasonRevoked = RefreshTokenRevocationReasons.Logout;
         await _db.SaveChangesAsync();
 
         return true;
@@ -247,6 +306,7 @@ public class AuthService
         {
             UserId = user.Id,
             TokenHash = tokenHash,
+            FamilyId = Guid.NewGuid(),
             ExpiresAtUtc = DateTime.UtcNow.AddDays(_options.RefreshToken.DaysToLive),
             CreatedAtUtc = DateTime.UtcNow,
             CreatedByIp = ip,

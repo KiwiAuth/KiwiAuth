@@ -5,6 +5,7 @@ using KiwiAuth.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 
 namespace KiwiAuth.Extensions;
@@ -99,6 +100,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<TokenService>();
         services.AddScoped<AuthService>();
         services.AddScoped<MfaService>();
+
+        // TryAdd so a consumer can register their own IKiwiAuthEventSink
+        // before or after calling AddKiwiAuth and it will win.
+        services.TryAddSingleton<IKiwiAuthEventSink, NullKiwiAuthEventSink>();
 
         return services;
     }

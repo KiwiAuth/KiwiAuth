@@ -19,10 +19,15 @@ public class KiwiDbContext : IdentityDbContext<ApplicationUser>
 
             entity.HasIndex(e => e.TokenHash).IsUnique();
             entity.HasIndex(e => e.UserId);
+            // FamilyId drives bulk-revocation on reuse detection.
+            entity.HasIndex(e => e.FamilyId);
 
             entity.Property(e => e.TokenHash)
                   .HasMaxLength(128)
                   .IsRequired();
+
+            entity.Property(e => e.ReasonRevoked)
+                  .HasMaxLength(32);
 
             entity.HasOne(e => e.User)
                   .WithMany(u => u.RefreshTokens)

@@ -13,6 +13,7 @@ Built for solo developers, indie hackers, startups, and internal tools that need
 - Email/password registration and login
 - JWT access tokens (HMAC-SHA256, short-lived)
 - Refresh token rotation with revocation (stored hashed, never plaintext)
+- **Refresh token reuse detection** (OAuth 2.0 Security BCP §4.14) — replaying a rotated token revokes the entire token family, catching stolen sessions
 - **TOTP-based MFA** (Google Authenticator, Authy, 1Password, etc.)
 - Recovery codes (8 single-use codes generated on MFA enable)
 - Logout with token invalidation
@@ -136,6 +137,7 @@ dotnet ef database update
 | `Jwt.SigningKey` | *(required, 32+ chars)* | HMAC-SHA256 signing key |
 | `Jwt.AccessTokenMinutes` | `15` | Access token lifetime |
 | `RefreshToken.DaysToLive` | `7` | Refresh token lifetime |
+| `RefreshToken.GraceWindowSeconds` | `30` | Tolerance window for concurrent legitimate refresh calls (see [Security](#security)) |
 | `Mfa.SessionTokenMinutes` | `5` | MFA session token lifetime |
 | `Mfa.RecoveryCodeCount` | `8` | Recovery codes generated on MFA enable |
 | `Google.ClientId` | `""` | Google OAuth client ID |
@@ -233,6 +235,66 @@ Refresh tokens are stored as SHA-256 hashes. The raw token never touches the dat
 
 ---
 
+## Security
+
+### Refresh token reuse detection
+
+Rotation alone does not defeat token theft. If an attacker steals a refresh token (XSS, malware on the device, leaked log), the only signal that anyone is ever going to see is a **replay of an already-rotated token** — either the thief races the legitimate client, or the legitimate client loses the race and ends up presenting the stolen-copy.
+
+KiwiAuth treats that signal as evidence of compromise. Every refresh token belongs to a **token family** (`FamilyId` column) identified at login. On rotation, the new token inherits the family. When a replay of a rotated token is detected outside the grace window, the **entire family is revoked at once**, forcing the legitimate client to log in again. The thief keeps nothing.
+
+```
+    Login ──► family=F  ──► T1(active)
+
+    Client refreshes ──► T1 revoked(rotated) → T2(active, family=F)
+
+    Attacker replays T1 ──► T1 already rotated → revoke EVERY token in family=F
+                            both T2 (attacker blocked) AND anyone still holding T2 (client kicked out)
+```
+
+### Grace window
+
+The real world has flaky networks and multi-tab SPAs that legitimately make near-simultaneous refresh calls with the same token. `RefreshToken.GraceWindowSeconds` (default **30 seconds**) defines how recently a token must have been rotated for a replay to be treated as a race instead of theft. During the grace window, the second caller gets `401 token_recently_rotated` and is expected to retry with whatever refresh cookie the browser holds now — the family is **not** revoked.
+
+Shorten the window for tighter security, lengthen it for more tolerance of poor networks. Set `0` to disable entirely (every rotated-token replay triggers family revocation).
+
+### Observability
+
+Register an `IKiwiAuthEventSink` to get notified when theft is detected or a family is revoked. Use it to page on-call, log to your SIEM, or fire a Slack alert.
+
+```csharp
+public class MyEventSink : IKiwiAuthEventSink
+{
+    public Task OnRefreshTokenReuseDetectedAsync(RefreshTokenReuseEvent evt, CancellationToken ct)
+    {
+        logger.LogWarning("Refresh token reuse for user {UserId} from {Ip}", evt.UserId, evt.Ip);
+        return Task.CompletedTask;
+    }
+
+    public Task OnFamilyRevokedAsync(TokenFamilyRevokedEvent evt, CancellationToken ct)
+        => Task.CompletedTask;
+}
+
+// Register BEFORE or AFTER AddKiwiAuth — TryAdd honours your registration.
+builder.Services.AddSingleton<IKiwiAuthEventSink, MyEventSink>();
+```
+
+### Other safeguards
+
+- Refresh tokens stored as SHA-256 hashes; raw value never touches the database
+- Access tokens are short-lived (15 min by default) and signed with HMAC-SHA256
+- Account lockout after N failed login attempts (default 5 / 15 min)
+- Password hashing via ASP.NET Core Identity (PBKDF2)
+- Email enumeration is blocked: wrong email and wrong password return the same `invalid_credentials` error
+- `/auth/forgot-password` always succeeds silently regardless of whether the email exists
+
+### References
+
+- [RFC 6749 §10.4 — Refresh Tokens](https://datatracker.ietf.org/doc/html/rfc6749#section-10.4)
+- [IETF OAuth 2.0 Security BCP §4.14 — Refresh Token Protection](https://datatracker.ietf.org/doc/html/rfc9700#section-4.14)
+
+---
+
 ## MFA Flow
 
 ```
@@ -295,7 +357,7 @@ Seeded credentials (Development only):
 dotnet test
 ```
 
-28 integration tests, in-memory SQLite, no external services required.
+33 integration tests, in-memory SQLite, no external services required.
 
 ---
 

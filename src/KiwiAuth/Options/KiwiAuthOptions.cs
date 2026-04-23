@@ -23,6 +23,13 @@ public class JwtOptions
 public class RefreshTokenOptions
 {
     public int DaysToLive { get; set; } = 7;
+
+    // Two near-simultaneous refresh calls can legitimately arrive with the same
+    // raw token (multi-tab SPA, retried mobile request, etc.). Inside this
+    // window we treat a "rotated token replay" as a race, not as theft —
+    // the second caller gets 401 token_recently_rotated, but the family is NOT
+    // revoked. Longer windows trade security for tolerance to flaky networks.
+    public int GraceWindowSeconds { get; set; } = 30;
 }
 
 public class MfaOptions
